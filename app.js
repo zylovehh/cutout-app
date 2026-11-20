@@ -1,4 +1,4 @@
-// 抠图 App：本地模型算整图透明度，点一下挑要留下的连通块，存透明底 PNG。
+// 抠图 App：本地模型算整图透明度，点一下挑要留下的连通块，画笔微调（擦除/恢复），边缘羽化，存透明底 PNG。
 // 照片只在手机里算，不上传。
 
 // ===== 模型配置（部署时填好） =====
@@ -27,8 +27,15 @@ let compId = null;           // Int32Array，0=背景，其余为块编号
 let compCount = 0;
 let compSize = [];           // 每块像素数
 let selSet = new Set();      // 选中的块编号
-let undoStack = [];          // Array<Set>
-let selMask = null;          // Uint8Array(procW*procH)，0/255，已扩 2px
+let undoStack = [];          // Array<{sel: Set, delta: Int8Array}>
+let baseMask = null;         // Uint8Array(procW*procH)，0/255，点选结果（已扩 2px）
+let editDelta = null;        // Int8Array，-100..100，画笔改动（擦除负，恢复正）
+let effMask = null;          // Uint8Array，0..255，base + delta 后的有效掩膜
+let featheredMask = null;    // Uint8Array，0..255，羽化后的掩膜（羽化为 0 时等于 effMask）
+let mode = 'pick';           // 'pick' | 'erase' | 'restore'
+let brushSize = 36;          // 画笔直径（处理尺寸像素）
+let feather = 2;             // 羽化半径（处理尺寸像素）
+let stroking = false;        // 画笔是否正在拖动
 
 // ---------- 小工具 ----------
 let toastTimer = null;
@@ -89,12 +96,16 @@ function setupImage(im) {
   procW = Math.max(1, Math.round(origW * s));
   procH = Math.max(1, Math.round(origH * s));
   alphaDone = false; fullAlpha = null; compId = null; compCount = 0;
-  selSet = new Set(); undoStack = []; selMask = null;
+  selSet = new Set(); undoStack = [];
+  baseMask = null; effMask = null; featheredMask = null;
+  editDelta = new Int8Array(procW * procH);
+  stroking = false;
   cv.width = procW; cv.height = procH;
   ctx.drawImage(origImg, 0, 0, procW, procH);
   $('editor').style.display = 'block';
   $('undoBtn').disabled = true;
   setStep(2);
+  setMode('pick');
   $('hint').textContent = '正在准备…点一下要留下的地方，模型第一次要下载，稍等一下。';
   $('pickBtn').style.display = 'none';
   $('editor').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -244,9 +255,9 @@ function compAt(x, y) {
   return 0;
 }
 
-// ---------- 选区 ----------
+// ---------- 选区 + 画笔 + 羽化 ----------
 function pushUndo() {
-  undoStack.push(new Set(selSet));
+  undoStack.push({ sel: new Set(selSet), delta: editDelta.slice() });
   if (undoStack.length > UNDO_MAX) undoStack.shift();
   $('undoBtn').disabled = undoStack.length === 0;
 }
@@ -280,7 +291,69 @@ function applySelection() {
     }
     mask = tmp2;
   }
-  selMask = mask;
+  baseMask = mask;
+  recomputeEff();
+  applyFeather();
+}
+
+// base + 画笔改动 = 有效掩膜（不含羽化）
+function recomputeEff() {
+  const N = procW * procH;
+  effMask = new Uint8Array(N);
+  for (let p = 0; p < N; p++) {
+    let v = baseMask[p] + Math.round(editDelta[p] * 2.55);
+    effMask[p] = v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+}
+
+// 羽化：用画布自带的高斯模糊糊一下掩膜边缘
+function blurMask(mask, w, h, r) {
+  if (r <= 0) return mask;
+  const c1 = document.createElement('canvas'); c1.width = w; c1.height = h;
+  const x1 = c1.getContext('2d');
+  const img = x1.createImageData(w, h);
+  for (let p = 0, j = 0; p < mask.length; p++, j += 4) {
+    img.data[j] = 255; img.data[j + 1] = 255; img.data[j + 2] = 255; img.data[j + 3] = mask[p];
+  }
+  x1.putImageData(img, 0, 0);
+  const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+  const x2 = c2.getContext('2d');
+  if (!('filter' in x2)) return mask;
+  x2.filter = 'blur(' + r + 'px)';
+  x2.drawImage(c1, 0, 0);
+  x2.filter = 'none';
+  const d = x2.getImageData(0, 0, w, h).data;
+  const out = new Uint8Array(w * h);
+  for (let p = 0, j = 0; p < out.length; p++, j += 4) out[p] = d[j + 3];
+  return out;
+}
+
+function applyFeather() {
+  featheredMask = blurMask(effMask, procW, procH, feather);
+}
+
+function currentMask() {
+  return featheredMask || effMask;
+}
+
+// 画笔涂一笔：软边圆笔刷，中间实、边缘渐弱
+function brushDab(cx, cy) {
+  const r = brushSize / 2;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(procW - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(procH - 1, Math.ceil(cy + r));
+  const dir = mode === 'erase' ? -1 : 1;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx, dy = y - cy;
+      const d = Math.sqrt(dx * dx + dy * dy) / r;
+      if (d >= 1) continue;
+      const f = 1 - d;
+      const p = y * procW + x;
+      let v = editDelta[p] + dir * f * 100;
+      editDelta[p] = v < -100 ? -100 : v > 100 ? 100 : Math.round(v);
+    }
+  }
+  recomputeEff();
 }
 
 // 把原图 + 掩膜合成 RGBA，边缘半透明像素用周围不透明像素的颜色去白晕
@@ -315,14 +388,52 @@ function buildRGBA(srcCanvas, mask, w, h) {
 }
 
 function render() {
-  if (!selMask) { ctx.drawImage(origImg, 0, 0, procW, procH); return; }
+  const m = currentMask();
+  if (!m) { ctx.drawImage(origImg, 0, 0, procW, procH); return; }
   const src = document.createElement('canvas');
   src.width = procW; src.height = procH;
   src.getContext('2d').drawImage(origImg, 0, 0, procW, procH);
-  ctx.putImageData(buildRGBA(src, selMask, procW, procH), 0, 0);
+  ctx.putImageData(buildRGBA(src, m, procW, procH), 0, 0);
 }
 
-// ---------- 点选 ----------
+// ---------- 模式 ----------
+function setMode(m) {
+  mode = m;
+  $('modePick').classList.toggle('on', m === 'pick');
+  $('modeErase').classList.toggle('on', m === 'erase');
+  $('modeRestore').classList.toggle('on', m === 'restore');
+  // 画笔要拖着涂，拖动时不让页面跟着滚；点选模式保持原来的手势
+  cv.style.touchAction = m === 'pick' ? 'manipulation' : 'none';
+  if (m === 'pick') {
+    $('hint').textContent = selSet.size
+      ? '已选 ' + selSet.size + ' 处。点一下去掉一处，或点“保存透明 PNG”。'
+      : '点一下要留下的地方；再点一下，去掉它。';
+  } else if (m === 'erase') {
+    $('hint').textContent = '涂掉不要的部分（比如海报上的大字）。涂错了切到“恢复”涂回来。';
+  } else {
+    $('hint').textContent = '涂回被误擦掉的地方，也可以直接涂出模型没抠到的部分。';
+  }
+}
+$('modePick').addEventListener('click', () => setMode('pick'));
+$('modeErase').addEventListener('click', () => setMode('erase'));
+$('modeRestore').addEventListener('click', () => setMode('restore'));
+
+$('brushSize').addEventListener('input', (e) => {
+  brushSize = +e.target.value;
+  $('brushSizeVal').textContent = brushSize;
+});
+$('feather').addEventListener('input', (e) => {
+  feather = +e.target.value;
+  $('featherVal').textContent = feather;
+  if (effMask) { applyFeather(); render(); }
+});
+
+// ---------- 画布手势 ----------
+function canvasPos(e) {
+  const rect = cv.getBoundingClientRect();
+  return [(e.clientX - rect.left) / rect.width * procW, (e.clientY - rect.top) / rect.height * procH];
+}
+
 let busy = false;
 cv.addEventListener('pointerdown', async (e) => {
   if (!origImg || busy) return;
@@ -330,9 +441,19 @@ cv.addEventListener('pointerdown', async (e) => {
   busy = true;
   try {
     await computeAlpha();
-    const rect = cv.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width * procW;
-    const y = (e.clientY - rect.top) / rect.height * procH;
+    const [x, y] = canvasPos(e);
+    if (mode !== 'pick') {
+      // 画笔模式：按住拖着涂
+      if (!baseMask) applySelection();
+      pushUndo();
+      stroking = true;
+      try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+      brushDab(x, y);
+      featheredMask = effMask; // 拖动时先不羽化，抬手再算，免得卡
+      render();
+      return;
+    }
+    // 点选模式：点一下开关一块
     const id = compAt(x, y);
     if (!id) { toast('这里没有抠出来的东西，点一下要留下的地方'); return; }
     pushUndo();
@@ -340,9 +461,12 @@ cv.addEventListener('pointerdown', async (e) => {
     applySelection();
     render();
     setStep(3);
-    $('hint').textContent = selSet.size
-      ? '已选 ' + selSet.size + ' 处。点一下去掉一处，或点“保存透明 PNG”。'
-      : '点一下要留下的地方；再点一下，去掉它。';
+    if (selSet.size) {
+      $('hint').textContent = '已选 ' + selSet.size + ' 处。点一下去掉一处，或点“保存透明 PNG”。';
+    } else {
+      $('hint').textContent = '都去掉了，点“撤销”找回来，或者点“自动抠图”重来。';
+      toast('都去掉了，点“撤销”找回来');
+    }
   } catch (err) {
     console.error(err);
     toast('抠图失败了，检查一下网络再试一次');
@@ -352,6 +476,24 @@ cv.addEventListener('pointerdown', async (e) => {
   }
 });
 
+cv.addEventListener('pointermove', (e) => {
+  if (!stroking || !origImg) return;
+  e.preventDefault();
+  const [x, y] = canvasPos(e);
+  brushDab(x, y);
+  featheredMask = effMask;
+  render();
+});
+
+function endStroke() {
+  if (!stroking) return;
+  stroking = false;
+  applyFeather();
+  render();
+}
+cv.addEventListener('pointerup', endStroke);
+cv.addEventListener('pointercancel', endStroke);
+
 $('autoBtn').addEventListener('click', async () => {
   if (!origImg || busy) return;
   busy = true;
@@ -360,10 +502,11 @@ $('autoBtn').addEventListener('click', async () => {
     pushUndo();
     selSet = new Set();
     for (let i = 1; i <= compCount; i++) selSet.add(i);
+    editDelta.fill(0);
     applySelection();
     render();
     setStep(3);
-    $('hint').textContent = '已选全部 ' + compCount + ' 处。点一下去掉不要的那处，或直接保存。';
+    $('hint').textContent = '已选全部 ' + compCount + ' 处。点一下去掉不要的那处，或用“擦除”涂掉不要的部分。';
   } catch (err) {
     console.error(err);
     toast('抠图失败了，检查一下网络再试一次');
@@ -376,16 +519,22 @@ $('autoBtn').addEventListener('click', async () => {
 $('undoBtn').addEventListener('click', () => {
   const prev = undoStack.pop();
   if (!prev) return;
-  selSet = prev;
+  selSet = prev.sel;
+  editDelta = prev.delta;
   $('undoBtn').disabled = undoStack.length === 0;
   applySelection();
   render();
+  setStep(selSet.size ? 3 : 2);
+  $('hint').textContent = selSet.size
+    ? '已选 ' + selSet.size + ' 处。点一下去掉一处，或点“保存透明 PNG”。'
+    : '点一下要留下的地方；再点一下，去掉它。';
 });
 
 $('resetBtn').addEventListener('click', () => {
-  if (!selSet.size) return;
+  if (!selSet.size && !effMask) return;
   pushUndo();
   selSet = new Set();
+  editDelta.fill(0);
   applySelection();
   render();
   $('hint').textContent = '点一下要留下的地方；再点一下，去掉它。';
@@ -393,7 +542,10 @@ $('resetBtn').addEventListener('click', () => {
 
 $('saveBtn').addEventListener('click', () => {
   if (!origImg) return;
-  if (!selSet.size) { toast('先点一下要留下的地方，再保存'); return; }
+  const m = currentMask();
+  let any = false;
+  if (m) for (let p = 0; p < m.length; p++) { if (m[p] > 0) { any = true; break; } }
+  if (!any) { toast('现在什么都没留下，先点一下要留下的地方'); return; }
   const s = Math.min(1, SAVE_EDGE / Math.max(origW, origH));
   const sw = Math.max(1, Math.round(origW * s));
   const sh = Math.max(1, Math.round(origH * s));
@@ -401,8 +553,8 @@ $('saveBtn').addEventListener('click', () => {
   const mc = document.createElement('canvas');
   mc.width = procW; mc.height = procH;
   const mid = mc.getContext('2d').createImageData(procW, procH);
-  for (let p = 0, j = 0; p < selMask.length; p++, j += 4) {
-    mid.data[j] = 255; mid.data[j + 1] = 255; mid.data[j + 2] = 255; mid.data[j + 3] = selMask[p];
+  for (let p = 0, j = 0; p < m.length; p++, j += 4) {
+    mid.data[j] = 255; mid.data[j + 1] = 255; mid.data[j + 2] = 255; mid.data[j + 3] = m[p];
   }
   mc.getContext('2d').putImageData(mid, 0, 0);
   const sc = document.createElement('canvas');

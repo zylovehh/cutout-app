@@ -1,6 +1,6 @@
 // 抠图 service worker：同源文件全部缓存优先。
 // 首次打开把页面、运行库和模型都存进手机，下次打开不用再下；xb 睡了也能打开用。
-const CACHE = 'cutout-v2';
+const CACHE = 'cutout-v3';
 const CORE = [
   './', 'index.html', 'app.js', 'ort.min.js', 'ort-wasm-simd.wasm',
   'manifest.json', 'icon-180.png', 'icon-192.png', 'icon-512.png'

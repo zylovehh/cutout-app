@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101014">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="抠图">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>抠图</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #101014; color: #f5f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 20px 16px calc(28px + env(safe-area-inset-bottom)); }
+  h1 { font-size: 26px; line-height: 1.2; margin: 4px 0 6px; }
+  .sub { font-size: 16px; line-height: 1.5; color: #a1a1aa; margin: 0 0 18px; }
+  .steps { display: flex; gap: 8px; margin: 0 0 18px; }
+  .step {
+    flex: 1 1 0; min-width: 0; text-align: center; white-space: nowrap;
+    font-size: 16px; font-weight: 600; line-height: 1;
+    padding: 13px 4px; border-radius: 999px;
+    background: #1f1f26; color: #e4e4e7; border: 1px solid #2c2c35;
+  }
+  .step.on { background: #0a84ff; border-color: #0a84ff; color: #fff; }
+  .bigbtn {
+    display: block; width: 100%; min-height: 60px;
+    font-size: 20px; font-weight: 700; line-height: 1.2;
+    color: #fff; background: #0a84ff; border: none; border-radius: 16px;
+    padding: 16px 12px; cursor: pointer; text-align: center;
+    touch-action: manipulation;
+  }
+  .bigbtn:active { background: #0066d6; }
+  .bigbtn.secondary { background: #26262e; color: #f5f5f7; border: 1px solid #3a3a44; }
+  .bigbtn.secondary:active { background: #34343e; }
+  .bigbtn:disabled { opacity: .45; }
+  #fileInput { display: none; }
+  #openTip {
+    display: none; margin: 0 0 16px; padding: 14px; border-radius: 12px;
+    background: #3a2b00; color: #ffd479; font-size: 16px; line-height: 1.6;
+  }
+  #progress { display: none; margin: 16px 0 0; }
+  #progress .bar {
+    height: 12px; border-radius: 999px; background: #26262e; overflow: hidden;
+  }
+  #progress .fill { height: 100%; width: 0%; background: #0a84ff; border-radius: 999px; }
+  #progress .txt { font-size: 16px; color: #a1a1aa; margin-top: 8px; line-height: 1.5; }
+  #editor { display: none; margin-top: 18px; }
+  #stage {
+    position: relative; border-radius: 12px; overflow: hidden;
+    background-color: #fff;
+    background-image:
+      linear-gradient(45deg, #d4d4d8 25%, transparent 25%, transparent 75%, #d4d4d8 75%),
+      linear-gradient(45deg, #d4d4d8 25%, transparent 25%, transparent 75%, #d4d4d8 75%);
+    background-size: 20px 20px; background-position: 0 0, 10px 10px;
+  }
+  #stage canvas { display: block; width: 100%; height: auto; touch-action: manipulation; }
+  .hint { font-size: 17px; line-height: 1.6; color: #d4d4d8; margin: 12px 0 14px; }
+  .row3 { display: flex; gap: 10px; }
+  .row3 button {
+    flex: 1 1 0; min-width: 0; min-height: 54px; white-space: nowrap;
+    font-size: 17px; font-weight: 600; color: #f5f5f7;
+    background: #26262e; border: 1px solid #3a3a44; border-radius: 14px;
+    padding: 12px 4px; cursor: pointer; touch-action: manipulation;
+  }
+  .row3 button:active { background: #34343e; }
+  .row3 button:disabled { opacity: .45; }
+  .row3 button.on { background: #0a84ff; border-color: #0a84ff; color: #fff; }
+  .sliderow {
+    display: flex; align-items: center; gap: 12px; margin-top: 12px;
+    font-size: 17px; color: #d4d4d8;
+  }
+  .sliderow label { white-space: nowrap; }
+  .sliderow input[type=range] { flex: 1 1 0; min-width: 0; min-height: 44px; accent-color: #0a84ff; }
+  .sliderow .val { min-width: 34px; text-align: right; color: #a1a1aa; }
+  .savewrap { margin-top: 12px; }
+  .again { margin-top: 12px; }
+  #toast {
+    display: none; position: fixed; left: 50%; bottom: calc(28px + env(safe-area-inset-bottom));
+    transform: translateX(-50%); max-width: calc(100vw - 32px);
+    background: #26262e; color: #f5f5f7; border: 1px solid #3a3a44;
+    font-size: 17px; line-height: 1.4; padding: 14px 18px; border-radius: 12px;
+    z-index: 10; text-align: center;
+  }
+  footer { margin-top: 26px; font-size: 14px; line-height: 1.7; color: #8e8e96; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>抠图</h1>
+  <p class="sub">点一下要留下的地方，抠出来存透明底 PNG。照片只在手机里算，不上传。</p>
+
+  <div id="openTip">你现在是从存下来的文件打开的：这样选照片进不了相册，模型也下不下来。请在 Safari 里打开这个网址，或从 Safari 点分享、添加到主屏幕，再从主屏幕图标打开。</div>
+
+  <div class="steps">
+    <div class="step on" id="step1">1 选图</div>
+    <div class="step" id="step2">2 点一下</div>
+    <div class="step" id="step3">3 保存</div>
+  </div>
+
+  <label class="bigbtn" for="fileInput" id="pickBtn">选一张照片</label>
+  <input type="file" id="fileInput" accept="image/*">
+
+  <div id="progress">
+    <div class="bar"><div class="fill" id="pfill"></div></div>
+    <div class="txt" id="ptxt">正在下载模型…</div>
+  </div>
+
+  <div id="editor">
+    <div id="stage"><canvas id="cv"></canvas></div>
+    <p class="hint" id="hint">点一下要留下的地方；再点一下，去掉它。也可以直接点“自动抠图”。</p>
+    <div class="row3">
+      <button type="button" id="modePick" class="on">点选</button>
+      <button type="button" id="modeErase">擦除</button>
+      <button type="button" id="modeRestore">恢复</button>
+    </div>
+    <div class="sliderow">
+      <label for="brushSize">笔刷大小</label>
+      <input type="range" id="brushSize" min="8" max="80" step="4" value="36">
+      <span class="val" id="brushSizeVal">36</span>
+    </div>
+    <div class="sliderow">
+      <label for="feather">边缘羽化</label>
+      <input type="range" id="feather" min="0" max="10" step="1" value="2">
+      <span class="val" id="featherVal">2</span>
+    </div>
+    <div class="row3" style="margin-top: 14px;">
+      <button type="button" id="autoBtn">自动抠图</button>
+      <button type="button" id="undoBtn" disabled>撤销</button>
+      <button type="button" id="resetBtn">重来</button>
+    </div>
+    <div class="savewrap">
+      <button type="button" class="bigbtn" id="saveBtn">保存透明 PNG</button>
+    </div>
+    <div class="again">
+      <button type="button" class="bigbtn secondary" id="againBtn">换一张照片</button>
+    </div>
+  </div>
+
+  <footer>
+    <p id="modelNote">首次使用要下载一次模型，下载后存在手机里，下次打开不用再下。</p>
+    <p>抠图全程在手机本地算，照片不会传到任何服务器。保存的图片在“文件”里找。</p>
+    <p>从主屏幕图标打开和 Safari 里打开是一样的，都能正常用。</p>
+  </footer>
+</div>
+
+<div id="toast"></div>
+<script src="ort.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
