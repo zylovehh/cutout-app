@@ -1,0 +1,1 @@
+{"background_color":"#101014","description":"点一下要留下的地方，抠出来存透明底 PNG。照片只在手机里算，不上传。","display":"standalone","icons":[{"sizes":"192x192","src":"icon-192.png","type":"image/png"},{"sizes":"512x512","src":"icon-512.png","type":"image/png"}],"name":"抠图","short_name":"抠图","start_url":"./index.html","theme_color":"#101014"}
